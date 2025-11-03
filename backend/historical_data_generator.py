@@ -1,4 +1,5 @@
-# Create historical_data_generator.py
+# C:\Users\anish\stock-sentiment-dashboard\backend\historical_data_generator.py
+
 import time
 import random
 from datetime import datetime, timedelta
@@ -15,7 +16,7 @@ def generate_historical_stock_data(symbol, days_back=30):
     db = SessionLocal()
     
     # Get current price as baseline
-    api_key = os.getenv("ALPHA_VANTAGE_API_KEY", "demo")
+    api_key = os.getenv("K9TPQLF8F5D8MRCN", "demo")
     url = "https://www.alphavantage.co/query"
     params = {
         'function': 'GLOBAL_QUOTE',
@@ -105,7 +106,16 @@ def generate_historical_sentiment_data(symbol, count=20):
     db.close()
 
 if __name__ == "__main__":
-    symbols = ["AAPL", "GOOGL", "MSFT"]
+    # --- MODIFIED: Expanded list to include 12 tickers ---
+    symbols = [
+        "AAPL", "GOOGL", "MSFT", 
+        "AMZN", "TSLA", "NVDA", 
+        "AMD", "NFLX", "BABA", 
+        "JPM", "WMT", "V"
+    ]
+    # --- END MODIFICATION ---
+    
+    # You MUST delete stockdb.db before running this to clear old data!
     
     for symbol in symbols:
         print(f"Generating historical data for {symbol}...")
@@ -115,4 +125,4 @@ if __name__ == "__main__":
         print("---")
     
     print("Historical data generation complete!")
-    
+

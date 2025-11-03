@@ -1,9 +1,14 @@
+# C:\Users\anish\stock-sentiment-dashboard\backend\api_server.py
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
 from database import SessionLocal, StockPrice, SentimentData, Correlation
 from ml_predictor import StockPredictor
-import uvicorn
+# ADDED:
+from typing import Dict, Any 
+# REMOVED uvicorn import from the top, moved to the bottom __main__ block
+import uvicorn 
 
 app = FastAPI(title="Stock Sentiment Dashboard API")
 
@@ -68,6 +73,36 @@ def get_sentiment(symbol: str):
         ]
     }
 
+# --- NEW FUNCTION FOR REAL-TIME TWITTER API INTEGRATION ---
+def fetch_and_analyze_live_sentiment(symbol: str) -> Dict[str, Any]:
+    """
+    *** YOU MUST REPLACE THIS FUNCTION WITH YOUR ACTUAL TWITTER API AND SENTIMENT LOGIC ***
+    """
+    # Returning Simulated Data as a placeholder for the live endpoint:
+    import random
+    score = random.uniform(-0.5, 0.5)
+    count = random.randint(50, 200)
+    
+    return {
+        "symbol": symbol.upper(),
+        "score": score,
+        "count": count,
+        "source": "Twitter/X Realtime API",
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/stocks/{symbol}/live_sentiment")
+def get_live_sentiment(symbol: str):
+    """Fetches real-time sentiment from a live source (e.g., Twitter)."""
+    try:
+        live_data = fetch_and_analyze_live_sentiment(symbol.upper())
+        return live_data
+    except Exception as e:
+        print(f"ERROR fetching live sentiment for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch live sentiment data.")
+
+# --- END NEW FUNCTION ---
+
 @app.get("/stocks/{symbol}/prediction")
 def get_prediction(symbol: str):
     # Train model if not already trained
@@ -88,4 +123,3 @@ def get_prediction(symbol: str):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
-    

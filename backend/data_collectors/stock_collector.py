@@ -1,77 +1,228 @@
 import requests
+import sqlite3
+import json
 import time
-from datetime import datetime
-import sys
+import logging
+from datetime import datetime, timezone
 import os
-# Add parent directory to path so we can import database
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from database import SessionLocal, StockPrice, Base, enginepython simple_stock_test.py
+from typing import List, Dict
 
-# Create tables if they don't exist
-Base.metadata.create_all(bind=engine)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-class StockDataCollector:
+class EnhancedStockCollector:
     def __init__(self):
-        # Using demo API key for now
-        self.api_key = "demo"
-        self.base_url = "https://www.alphavantage.co/query"
-        self.symbols = ["AAPL", "GOOGL", "MSFT", "TSLA"]
-    
-    def fetch_stock_price(self, symbol):
-        """Fetch current stock price for a symbol"""
-        params = {
-            'function': 'GLOBAL_QUOTE',
-            'symbol': symbol,
-            'apikey': self.api_key
-        }
+        self.db_path = 'stockdb.db'
+        self.alpha_vantage_key = os.getenv('ALPHA_VANTAGE_API_KEY')
+        self.finnhub_key = os.getenv('FINNHUB_API_KEY')
         
-        try:
-            response = requests.get(self.base_url, params=params)
-            data = response.json()
+        # Expanded stock list (matching Twitter collector)
+        self.HIGH_VOLUME_STOCKS = [
+            'AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMZN', 
+            'META', 'NFLX', 'GME', 'AMC', 'SPY', 'QQQ'
+        ]
+        
+        # Initialize database
+        self._init_database()
+    
+    def _init_database(self):
+        """Initialize enhanced database schema"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Enhanced stock prices table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS stock_prices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                price REAL NOT NULL,
+                change_percent REAL,
+                volume INTEGER,
+                timestamp TEXT NOT NULL,
+                source TEXT DEFAULT 'api',
+                UNIQUE(symbol, timestamp)
+            )
+        ''')
+        
+        # Create index for faster queries
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_symbol_timestamp 
+            ON stock_prices(symbol, timestamp)
+        ''')
+        
+        conn.commit()
+        conn.close()
+    
+    def get_stock_price_finnhub(self, symbol: str) -> Dict:
+        """Get real-time stock price from Finnhub"""
+        if not self.finnhub_key:
+            return None
             
-            if "Global Quote" in data:
-                quote = data["Global Quote"]
+        try:
+            url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={self.finnhub_key}"
+            response = requests.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
                 return {
                     'symbol': symbol,
-                    'price': float(quote["05. price"]),
-                    'volume': int(quote["06. volume"]),
-                    'timestamp': datetime.now()
+                    'price': data['c'],  # current price
+                    'change_percent': data['dp'],  # percent change
+                    'volume': data.get('v', 0),  # volume
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'source': 'finnhub'
                 }
-            else:
-                print(f"API response for {symbol}: {data}")
-                return None
         except Exception as e:
-            print(f"Error fetching {symbol}: {e}")
-            return None
+            logger.error(f"Finnhub API error for {symbol}: {e}")
+        
+        return None
     
-    def store_stock_data(self, stock_data):
-        """Store stock data in database"""
-        db = SessionLocal()
+    def get_stock_price_alpha_vantage(self, symbol: str) -> Dict:
+        """Get stock price from Alpha Vantage (fallback)"""
+        if not self.alpha_vantage_key:
+            return None
+            
         try:
-            stock_price = StockPrice(
-                symbol=stock_data['symbol'],
-                price=stock_data['price'],
-                volume=stock_data['volume'],
-                timestamp=stock_data['timestamp']
-            )
-            db.add(stock_price)
-            db.commit()
-            print(f"Stored {stock_data['symbol']}: ${stock_data['price']}")
+            url = f"https://www.alphavantage.co/query"
+            params = {
+                'function': 'GLOBAL_QUOTE',
+                'symbol': symbol,
+                'apikey': self.alpha_vantage_key
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                quote = data.get('Global Quote', {})
+                
+                if quote:
+                    return {
+                        'symbol': symbol,
+                        'price': float(quote.get('05. price', 0)),
+                        'change_percent': float(quote.get('10. change percent', '0%').replace('%', '')),
+                        'volume': int(quote.get('06. volume', 0)),
+                        'timestamp': datetime.now(timezone.utc).isoformat(),
+                        'source': 'alpha_vantage'
+                    }
         except Exception as e:
-            print(f"Database error: {e}")
-        finally:
-            db.close()
+            logger.error(f"Alpha Vantage API error for {symbol}: {e}")
+        
+        return None
+    
+    def get_stock_price_yahoo_fallback(self, symbol: str) -> Dict:
+        """Yahoo Finance fallback (free but unofficial)"""
+        try:
+            # Simple Yahoo Finance scraping as last resort
+            import yfinance as yf
+            
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+            hist = ticker.history(period="1d")
+            
+            if not hist.empty:
+                current_price = hist['Close'].iloc[-1]
+                volume = hist['Volume'].iloc[-1]
+                
+                return {
+                    'symbol': symbol,
+                    'price': float(current_price),
+                    'change_percent': 0,  # Calculate if needed
+                    'volume': int(volume),
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'source': 'yahoo_fallback'
+                }
+        except Exception as e:
+            logger.error(f"Yahoo fallback error for {symbol}: {e}")
+        
+        return None
+    
+    def collect_stock_price(self, symbol: str) -> Dict:
+        """Collect stock price with multiple API fallbacks"""
+        # Try Finnhub first (most reliable for real-time)
+        price_data = self.get_stock_price_finnhub(symbol)
+        
+        # Fallback to Alpha Vantage
+        if not price_data:
+            price_data = self.get_stock_price_alpha_vantage(symbol)
+        
+        # Last resort: Yahoo Finance
+        if not price_data:
+            price_data = self.get_stock_price_yahoo_fallback(symbol)
+        
+        return price_data
+    
+    def store_price_data(self, price_data: Dict):
+        """Store price data in database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT OR IGNORE INTO stock_prices 
+                (symbol, price, change_percent, volume, timestamp, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                price_data['symbol'],
+                price_data['price'],
+                price_data.get('change_percent', 0),
+                price_data.get('volume', 0),
+                price_data['timestamp'],
+                price_data['source']
+            ))
+            
+            conn.commit()
+            conn.close()
+            
+            logger.info(f"Stored {price_data['symbol']}: ${price_data['price']}")
+            
+        except Exception as e:
+            logger.error(f"Database storage error: {e}")
     
     def collect_all_stocks(self):
-        """Collect data for all tracked symbols"""
-        for symbol in self.symbols:
-            stock_data = self.fetch_stock_price(symbol)
-            if stock_data:
-                self.store_stock_data(stock_data)
-            time.sleep(12)  # API rate limiting
+        """Collect prices for all tracked stocks"""
+        successful_collections = 0
+        
+        for symbol in self.HIGH_VOLUME_STOCKS:
+            try:
+                price_data = self.collect_stock_price(symbol)
+                
+                if price_data:
+                    self.store_price_data(price_data)
+                    successful_collections += 1
+                
+                # Small delay between requests to be respectful
+                time.sleep(1)
+                
+            except Exception as e:
+                logger.error(f"Error collecting {symbol}: {e}")
+        
+        logger.info(f"Successfully collected {successful_collections}/{len(self.HIGH_VOLUME_STOCKS)} stocks")
+        return successful_collections
+    
+    def start_continuous_collection(self, interval_minutes=1):
+        """Start continuous stock price collection"""
+        logger.info(f"Starting continuous stock collection every {interval_minutes} minutes...")
+        
+        while True:
+            try:
+                start_time = time.time()
+                count = self.collect_all_stocks()
+                
+                collection_time = time.time() - start_time
+                logger.info(f"Collection cycle completed in {collection_time:.2f}s, collected {count} stocks")
+                
+                # Wait for the remaining time in the interval
+                wait_time = max(0, (interval_minutes * 60) - collection_time)
+                time.sleep(wait_time)
+                
+            except KeyboardInterrupt:
+                logger.info("Stopping stock collection...")
+                break
+            except Exception as e:
+                logger.error(f"Collection cycle error: {e}")
+                time.sleep(60)  # Wait 1 minute on error
 
 if __name__ == "__main__":
-    collector = StockDataCollector()
-    print("Testing stock data collection...")
-    collector.collect_all_stocks()
-    print("Test complete!")
+    collector = EnhancedStockCollector()
+    collector.start_continuous_collection(interval_minutes=1)  # Collect every minute
